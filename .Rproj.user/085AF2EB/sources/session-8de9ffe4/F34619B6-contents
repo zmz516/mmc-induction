@@ -1,0 +1,379 @@
+# to do 08/07 -------------------------------------------------------------
+# DONE try and fix time 
+
+# code for nice plot (facet wrap or plot on same plot)
+# instead of plotting wells separately, treat as replicates and plot an average value
+# plot all samples on same axes
+
+# DONE box plots for area under the curve 
+# stat tests (e.g. ANOVA), save to tables
+
+# push all to git hub 
+
+
+# load packages -----------------------------------------------------------
+
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# install.packages("MESS")
+# install.packages("emmeans")
+# install.packages("FSA")
+
+# importing and making tidy -----------------------------------------------
+
+df <- read_excel("data-raw/practice-plate-reader.xlsx")
+
+# this is a function that extracts the cycle block from the raw data
+extract_cycle <- function(df, start_row, cycle_label){
+  block <- df[(start_row +3) : (start_row +10), 1:13]
+  colnames(block) <- c("row", as.character(1:12))
+  block [,2:13] <- lapply(block[, 2:13], \(x) suppressWarnings(as.numeric(x)))
+  block_long <- pivot_longer(block,
+                             cols = -row, 
+                             names_to = "col",
+                             values_to = "OD") |>
+    mutate(
+      well = paste0(row, col),
+      cycle = cycle_label
+    )
+  return(block_long)
+}
+
+# this finds where the cycle starts and saves it as a variable
+cycle_starts <- which(str_detect(df[[1]], "Cycle"))
+ 
+# loop through each cycle block and extract
+all_cycles <- lapply(cycle_starts, function(i){
+  cycle_label <- df[[1]][i]
+  extract_cycle(df, i, cycle_label)
+}) |> 
+  bind_rows()
+
+# converting cycle into time (so we can plot)
+
+    library(stringr)
+    hours <- as.numeric(str_extract(all_cycles$cycle, "\\d+(?=\\s*h)"))
+    minutes <- as.numeric(str_extract(all_cycles$cycle, "\\d+(?=\\s*min)"))
+    hours[is.na(hours)] <- 0
+    minutes[is.na(minutes)] <- 0
+    all_cycles$minutes <- (hours * 60) + minutes
+    
+# merging metadata with experimental data
+meta <- read_excel("data-raw/practice-plate-reader.xlsx",
+                   sheet = "metadata")
+
+# inner join (make sure dplyr is loaded)
+data <- inner_join(all_cycles, meta, by = "well")
+view(data)
+
+# visualising the data ----------------------------------------------------
+# host
+host <- data |>
+  filter(sample == "host") |> 
+  select(OD, minutes, well)
+host_plot <- ggplot(data = host, aes(x = minutes, y = OD))+
+  geom_point(aes(colour = well), alpha = 0.4)+
+  geom_smooth(se = FALSE, colour = "black") +
+  labs(title = "host") +
+  theme_minimal()
+host_plot
+ggsave("plots/host.png", plot = host_plot, width = 7, height = 5, dpi = 300)
+  # yes, there is quite a bit of variation between the wells
+  # B8 clear outlier
+
+# lysogen
+lys <- data |>
+  filter(sample == "lys") |> 
+  select(OD, minutes, well)
+lys_plot <- ggplot(data = lys, aes(x = minutes, y = OD))+
+  geom_point(aes(colour = well), alpha = 0.4)+
+  labs(title = "lys") +
+  theme_minimal()
+lys_plot
+ggsave("plots/lys.png", plot = lys_plot, width = 7, height = 5, dpi = 300)
+  # also quite a bit of variation between the wells
+  # C1, C2, C3 much lower than rest
+
+# host + phage
+hostphage <- data |>
+  filter(sample == "host-phage") |> 
+  select(OD, minutes, well)
+hostphage_plot <- ggplot(data = hostphage, aes(x = minutes, y = OD))+
+  geom_point(aes(colour = well), alpha = 0.4)+
+  geom_smooth(se = FALSE, colour = "black") +
+  labs(title = "host + phage") +
+  theme_minimal()
+hostphage_plot
+ggsave("plots/host-phage.png", plot = hostphage_plot, width = 7, height = 5, dpi = 300)
+  # more consistent!
+
+# control 
+LB <- data |>
+  filter(sample == "LB") |> 
+  select(OD, minutes, well)
+LB_plot <- ggplot(data = LB, aes(x = minutes, y = OD, colour = well))+
+  geom_point() +
+  labs(title = "LB control") +
+  theme_minimal()
+LB_plot
+ggsave("plots/LB.png", plot = LB_plot , width = 7, height = 5, dpi = 300)
+# H2 is an outlier, condensation in the well?
+
+# try fitting a non-linear model ---------------------------------------------
+
+# assuming the data follows a logistic growth model
+# (common S-shaped curve for growth / OD data)
+# y = L / (1+exp(-k(x-x0)))
+# L = maximum OD capacity
+# k = growth rate
+# x0 = x value of midpoint of the curve
+
+# try fitting this to the host-phage data first as it had the least variation between wells?
+
+# using a "self starting model" which will automatically calculate the starting values
+
+fit_logistic <- nls(OD ~ SSlogis(minutes, L, x0, scal), data = hostphage)
+summary(fit_logistic)
+
+# Formula: OD ~ SSlogis(minutes, L, x0, scal)
+# 
+# Parameters:
+#         Estimate Std. Error t value Pr(>|t|)    
+#   L    2.026e+00  5.042e-03  401.82   <2e-16 ***
+#   x0   1.490e+02  2.256e+00   66.04   <2e-16 ***
+#   scal 1.563e+02  2.650e+00   59.00   <2e-16 ***
+#   ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Residual standard error: 0.07375 on 525 degrees of freedom
+# 
+# Number of iterations to convergence: 0 
+# Achieved convergence tolerance: 2.9e-07
+
+
+# get the parameters of the fitted model
+fit_logistic$m$getPars()
+# L         x0       scal 
+# 2.025777 148.983014 156.339223 
+
+# # check R2 to see if the equation is a good fit for the data
+# R2 is a measure of explained variance
+# defined by R2 = 1 - RSS/TSS
+# RSS = sum of squared residuals
+# TSS = total sum of squares (variance of data)
+
+# better fit = R2 closer to 1 (smaller RSS/TSS)
+
+# calculate RSS
+rss <- sum(residuals(fit_logistic)**2)
+
+# calculate TSS
+tss <- sum((hostphage$OD-mean(hostphage$OD))**2)
+
+# calculate R2
+rsquared <- 1-rss/tss
+  #  0.9711533
+
+# plotting over the data
+hostphage_curve <- ggplot(data = hostphage, aes(x = minutes, y = OD, colour = well)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "nls", 
+              formula = y ~ SSlogis(x, L, x0, scal), 
+              se = FALSE, 
+              color = "black") + 
+  labs(title = "host-phage growth curve with logistic growth model fit",
+       subtitle = "Rsquared = 0.9711533") +
+  theme_minimal()
+hostphage_curve
+ggsave("plots/hostphage_growth_curve.png", plot = hostphage_curve, width = 7, height = 5, dpi = 300)
+
+
+
+# plotting ----------------------------------------------------------------
+
+# excluding wells where the readings were very different
+data_clean <- data |> 
+  filter(!well %in% c("B1", "B2", "B3","B8", "C1","C2", "C3", "H2"))
+
+# finding an average for each sample at each time point
+data_average <- data_clean |> 
+  group_by(minutes, sample) |> 
+  summarise(mean = mean(OD, na.rm = TRUE)) 
+
+ggplot(data = data_average, aes(x = minutes, y = mean, shape = sample, colour = sample))+
+  geom_point(size = 1) +
+  theme_minimal()+
+  labs(title = "Plate Reader Growth Curves",
+       x = "Minutes",
+       y = "OD600",
+       shape = "Sample",
+       colour = "Sample") +
+  scale_shape_discrete(labels = c("host"="Host",
+                                  "host-phage"="Host + Phage",
+                                  "LB"="LB",
+                                  "lys"="Lysogen"))+
+  scale_colour_discrete(labels = c("host"="Host",
+                                   "host-phage"="Host + Phage",
+                                   "LB"="LB",
+                                   "lys"="Lysogen"))+
+  theme(legend.title = element_text())
+
+
+# AUC ---------------------------------------------------------------------
+library(MESS)
+data_well_auc <- data_clean |> 
+  group_by(sample, well) |> 
+  summarise(AUC = auc(minutes, OD), .groups = "drop")
+
+# box plots
+# for small number of wells, standard box plots can hide the raw data
+# overlay the individual data points
+
+auc_plot <- ggplot(data = data_well_auc, aes(x = sample, y = AUC, fill = sample))+
+  geom_boxplot(alpha = 0.6, outlier.shape = NA)+
+  geom_jitter(width = 0.15, size = 2)+
+  theme_minimal()+
+  labs(title = "AUC by Sample",
+       x = "Sample Condition",
+       y = "Total AUC (OD600 x Minutes)")+
+  scale_x_discrete(limits = c("host", "lys", "host-phage", "LB"),
+                   labels = c("host" = "Host",
+                              "lys" = "Lysogen",
+                              "host-phage" = "Host + Phage",
+                              "LB" = "LB "))+
+  annotate("segment", x = 1, xend = 2,
+           y = 2600, yend = 2600,
+           colour = "black")+
+  annotate("text", x = 1.5, y = 2700,
+           label = glue::glue("italic(p==0.0203)"), parse = TRUE)+
+  annotate("segment", x = 2, xend = 3,
+           y = 2650, yend = 2650,
+           colour = "black")+
+  annotate("text", x = 2.5, y = 2750,
+           label = glue::glue("italic(p==0.0008)"), parse = TRUE)+
+  theme(legend.position = "none")
+
+ggsave("plots/auc_plot.png", plot = auc_plot, width = 7, height = 5, dpi = 300)
+
+# not sure about this...
+
+# ANOVA -------------------------------------------------------------------
+# https://3mmarand.github.io/comp4biosci/one-way-anova-and-kw.html
+
+anova_mod <- lm(data = data_well_auc, AUC ~ sample)
+summary(anova_mod)
+
+
+# Residuals:
+#   Min      1Q  Median      3Q     Max 
+# -80.872 -22.853  -6.015   5.282 108.287 
+# 
+# Coefficients:
+#                    Estimate Std. Error t value Pr(>|t|)    
+#   (Intercept)       2321.28      28.36  81.860  < 2e-16 ***
+#   samplehost-phage   -73.15      40.10  -1.824  0.09311 .  
+#   sampleLB         -2058.18      43.32 -47.516 4.94e-15 ***
+#   samplelys          132.66      38.04   3.487  0.00449 ** 
+#   ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Residual standard error: 56.71 on 12 degrees of freedom
+# Multiple R-squared:  0.9964,	Adjusted R-squared:  0.9955 
+# F-statistic:  1110 on 3 and 12 DF,  p-value: 6.269e-15
+
+anova(anova_mod)
+# Analysis of Variance Table
+# 
+# Response: AUC
+#             Df   Sum Sq Mean Sq F value    Pr(>F)    
+#   sample     3 10712450 3570817  1110.2 6.269e-15 ***
+#   Residuals 12    38597    3216                      
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+# the ANOVA is significant
+# this tells us that sample has an effect on AUC
+# to find out which means differ we need a post hoc test
+
+# Tukey's HSD
+library(emmeans)
+
+emmeans(anova_mod, ~sample) |> pairs()
+# contrast            estimate   SE df t.ratio p.value
+# host - (host-phage)     73.2 40.1 12   1.824  0.3094
+# host - LB             2058.2 43.3 12  47.516 <0.0001
+# host - lys            -132.7 38.0 12  -3.487  0.0203
+# (host-phage) - LB     1985.0 43.3 12  45.827 <0.0001
+# (host-phage) - lys    -205.8 38.0 12  -5.410  0.0008
+# LB - lys             -2190.8 41.4 12 -52.897 <0.0001
+
+# significant p values for:
+  # each sample vs control
+  # host vs lysogen
+  # host+phage vs lysogen
+
+      # add these to your plot!
+
+# make sure to check the assumptions of the linear model
+# (normal residuals and homogeneity of variance )
+plot(anova_mod, which = 1)
+  # variance is much higher for the highest means
+  # does not meet assumption of homogeneity of variance
+
+ggplot(mapping = aes(x = anova_mod$residuals)) + 
+  geom_histogram(bins = 5)
+  # looks fairly symmetrical
+  # meets the assumption of normally distributed 
+
+shapiro.test(anova_mod$residuals)
+# Shapiro-Wilk normality test
+# 
+# data:  anova_mod$residuals
+# W = 0.91049, p-value = 0.1185
+# 
+  # p is >0.05 so the normality assumption is not significant
+
+
+# non parametric KW -------------------------------------------------------
+# violation of homogeneity of variance
+# a non parametric test might be more suitable
+
+# summarise the data
+well_auc_summary <- data_well_auc |> 
+  group_by(sample) |> 
+  summarise(median = median(AUC),
+            interquartile = IQR(AUC),
+            n = length(AUC))
+print(well_auc_summary)
+
+# apply KW test
+kruskal.test(data = data_well_auc, AUC ~ sample )
+
+# Kruskal-Wallis rank sum test
+# 
+# data:  AUC by sample
+# Kruskal-Wallis chi-squared = 12.726, df = 3, p-value = 0.005269
+
+# the p-value is larger than for ANOVA, but still significant (<0.05)
+# significant KW = at least two of the groups differ
+# Dunn test used to determine where the differences lie
+
+library(FSA)
+dunnTest(data = data_well_auc, AUC ~ sample )
+
+#         Comparison          Z      P.unadj       P.adj
+# 1 host - host-phage  0.8168717 0.4140017389 0.414001739
+# 2         host - LB  1.9250668 0.0542209963 0.216883985
+# 3   host-phage - LB  1.1687906 0.2424880151 0.484976030
+# 4        host - lys -1.5029383 0.1328549557 0.398564867
+# 5  host-phage - lys -2.3639967 0.0180789737 0.090394868
+# 6          LB - lys -3.3938201 0.0006892496 0.004135498
+
+# significant p value only for LB-lys???
+# check this, it doesn't feel right
+
+
+
